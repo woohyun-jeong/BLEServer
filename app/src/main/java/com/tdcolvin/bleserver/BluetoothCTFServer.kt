@@ -1,5 +1,8 @@
 package com.tdcolvin.bleserver
 
+import android.Manifest
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
@@ -12,7 +15,12 @@ import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.ParcelUuid
+import android.util.Log
+import android.widget.Toast
 import androidx.annotation.RequiresPermission
+import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
@@ -56,8 +64,9 @@ class BluetoothCTFServer(private val context: Context) {
             return@withContext
         }
 
-        startHandlingIncomingConnections()
         startAdvertising()
+        startHandlingIncomingConnections()
+
     }
 
     @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_CONNECT, PERMISSION_BLUETOOTH_ADVERTISE])
@@ -71,8 +80,13 @@ class BluetoothCTFServer(private val context: Context) {
         stopHandlingIncomingConnections()
     }
 
+    @SuppressLint("MissingPermission")
     @RequiresPermission(PERMISSION_BLUETOOTH_ADVERTISE)
     private suspend fun startAdvertising() {
+        val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        val bluetoothAdapter = bluetoothManager.adapter
+        bluetoothAdapter.name = "TEST"
+
         val advertiser: BluetoothLeAdvertiser = bluetooth.adapter.bluetoothLeAdvertiser
             ?: throw Exception("This device is not able to advertise")
 
@@ -86,18 +100,23 @@ class BluetoothCTFServer(private val context: Context) {
             .setConnectable(true)
             .setTimeout(0)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+
             .build()
 
         val data = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
+            .setIncludeDeviceName(BluetoothAdapter.getDefaultAdapter().setName("TEST"))
             .setIncludeTxPowerLevel(false)
-//            .addServiceUuid(ParcelUuid(serviceUuid))
+            .addServiceUuid(ParcelUuid(serviceUuid))
+//            .addServiceData(ParcelUuid(serviceUuid), "Data")
             .build()
 
         advertiseCallback = suspendCoroutine { continuation ->
             val advertiseCallback = object: AdvertiseCallback() {
                 override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+                    Toast.makeText(context, "Advertising 성공~ ", Toast.LENGTH_SHORT).show()
+
                     super.onStartSuccess(settingsInEffect)
+
                     continuation.resume(this)
                 }
 
@@ -122,11 +141,22 @@ class BluetoothCTFServer(private val context: Context) {
         }
     }
 
-    @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
     private fun startHandlingIncomingConnections() {
+        if (ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_CONNECT
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.v("bluetooth", "startHandlingIncomingConnections failed")
+            return
+        }
+        Log.v("bluetooth", "startHandlingIncomingConnections success")
+
         server = bluetooth.openGattServer(context, object: BluetoothGattServerCallback() {
             override fun onServiceAdded(status: Int, service: BluetoothGattService?) {
                 super.onServiceAdded(status, service)
+                Log.v("bluetooth server status", status.toString())
+                Log.v("bluetooth onServiceAdded", service?.includedServices.toString())
                 isServerListening.value = true
             }
 
@@ -138,6 +168,8 @@ class BluetoothCTFServer(private val context: Context) {
                 characteristic: BluetoothGattCharacteristic?
             ) {
                 super.onCharacteristicReadRequest(device, requestId, offset, characteristic)
+
+
                 server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, "HELLO".encodeToByteArray())
             }
 
@@ -188,6 +220,12 @@ class BluetoothCTFServer(private val context: Context) {
             }
         })
 
+        if (server == null) {
+            Log.w("bluetooth server", "Unable to create GATT server")
+        } else {
+            Log.v("bluetooth server", "Enable to create GATT server")
+
+        }
         val service = BluetoothGattService(serviceUuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
 
         val passwordCharacteristic = BluetoothGattCharacteristic(
@@ -204,7 +242,10 @@ class BluetoothCTFServer(private val context: Context) {
 
         service.addCharacteristic(passwordCharacteristic)
         service.addCharacteristic(nameCharacteristic)
+        Log.v("bluetooth server", "addService")
+
         server?.addService(service)
+        Log.v("bluetooth server", server?.services.toString())
         ctfService = service
     }
 
