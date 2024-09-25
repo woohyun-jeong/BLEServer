@@ -25,13 +25,25 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.security.KeyFactory
+import java.security.KeyPairGenerator
+import java.security.PrivateKey
+import java.security.PublicKey
+import java.security.spec.X509EncodedKeySpec
+import java.util.Base64
 import java.util.UUID
+import javax.crypto.Cipher
+import javax.crypto.KeyAgreement
+import javax.crypto.SecretKey
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 const val CTF_SERVICE_UUID = "8c380000-10bd-4fdb-ba21-1922d6cf860d"
-const val PASSWORD_CHARACTERISTIC_UUID = "8c380001-10bd-4fdb-ba21-1922d6cf860d"
-const val NAME_CHARACTERISTIC_UUID = "8c380002-10bd-4fdb-ba21-1922d6cf860d"
+const val PUBLICK_KEY_DATA_CHARACTERISTIC_UUID = "8c380001-10bd-4fdb-ba21-1922d6cf860d"
+const val DATA_CHARACTERISTIC_UUID = "8c380002-10bd-4fdb-ba21-1922d6cf860d"
 
 //These fields are marked as API >= 31 in the Manifest class, so we can't use those without warning.
 //So we create our own, which prevents over-suppression of the Linter
@@ -44,8 +56,8 @@ class BluetoothCTFServer(private val context: Context) {
         ?: throw Exception("This device doesn't support Bluetooth")
 
     private val serviceUuid = UUID.fromString(CTF_SERVICE_UUID)
-    private val passwordCharUuid = UUID.fromString(PASSWORD_CHARACTERISTIC_UUID)
-    private val nameCharUuid = UUID.fromString(NAME_CHARACTERISTIC_UUID)
+    private val publicKeyCharUuid = UUID.fromString(PUBLICK_KEY_DATA_CHARACTERISTIC_UUID)
+    private val dataCharUuid = UUID.fromString(DATA_CHARACTERISTIC_UUID)
 
     private var server: BluetoothGattServer? = null
     private var ctfService: BluetoothGattService? = null
@@ -56,6 +68,10 @@ class BluetoothCTFServer(private val context: Context) {
     private val preparedWrites = HashMap<Int, ByteArray>()
 
     val namesReceived = MutableStateFlow(emptyList<String>())
+
+    var publicKey: PublicKey? = null
+    private var privateKey: PrivateKey? = null
+    private var receivePublicKey: PublicKey? = null
 
     @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_CONNECT, PERMISSION_BLUETOOTH_ADVERTISE])
     suspend fun startServer() = withContext(Dispatchers.IO) {
@@ -100,21 +116,18 @@ class BluetoothCTFServer(private val context: Context) {
             .setConnectable(true)
             .setTimeout(0)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-
             .build()
 
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(BluetoothAdapter.getDefaultAdapter().setName("TEST"))
             .setIncludeTxPowerLevel(false)
             .addServiceUuid(ParcelUuid(serviceUuid))
-//            .addServiceData(ParcelUuid(serviceUuid), "Data")
             .build()
 
         advertiseCallback = suspendCoroutine { continuation ->
             val advertiseCallback = object: AdvertiseCallback() {
                 override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                     Toast.makeText(context, "Advertising 성공~ ", Toast.LENGTH_SHORT).show()
-
                     super.onStartSuccess(settingsInEffect)
 
                     continuation.resume(this)
@@ -139,6 +152,7 @@ class BluetoothCTFServer(private val context: Context) {
             advertiser.stopAdvertising(it)
             advertiseCallback = null
         }
+
     }
 
     private fun startHandlingIncomingConnections() {
@@ -168,9 +182,24 @@ class BluetoothCTFServer(private val context: Context) {
                 characteristic: BluetoothGattCharacteristic?
             ) {
                 super.onCharacteristicReadRequest(device, requestId, offset, characteristic)
+                Log.d("TTTT", characteristic!!.uuid.toString())
 
+                if (characteristic != null) {
+                    if (characteristic.uuid == publicKeyCharUuid) {
+                        generateKeyPair().apply {
+                            publicKey = this.first
+                            privateKey = this.second
+                        }
 
-                server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, "HELLO".encodeToByteArray())
+                        Log.d("TTTT public key :", publicKeyToString(publicKey!!))
+                        Log.d("TTTT privateKey key :", priveKeyToString(privateKey!!))
+
+                        val data = publicKey!!.encoded
+
+                        server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
+                    }
+                }
+
             }
 
             @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
@@ -193,18 +222,40 @@ class BluetoothCTFServer(private val context: Context) {
                     value
                 )
                 super.onCharacteristicWriteRequest(device, requestId, characteristic, preparedWrite, responseNeeded, offset, value)
+                Log.d("TTTT", "onCharacteristicWriteRequest")
+                Log.d("TTTT", characteristic.uuid.toString())
+                Log.d("TTTT data", dataCharUuid.toString())
 
-                if(preparedWrite) {
-                    val bytes = preparedWrites.getOrDefault(requestId, byteArrayOf())
-                    preparedWrites[requestId] = bytes.plus(value)
-                }
-                else {
-                    namesReceived.update { it.plus(String(value)) }
+                if (characteristic.uuid.equals(publicKeyCharUuid)) {
+                    Log.d("TTTT value : ", publicKeyToString(getPublicKeyFromEncoded(value)))
+                    receivePublicKey = getPublicKeyFromEncoded(value)
+                    if(preparedWrite) {
+                        val bytes = preparedWrites.getOrDefault(requestId, byteArrayOf())
+                        preparedWrites[requestId] = bytes.plus(value)
+                    }
+                    else {
+                        namesReceived.update { it.plus(publicKeyToString(getPublicKeyFromEncoded(value))) }
+                    }
+
+                    if(responseNeeded) {
+                        server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, byteArrayOf())
+                    }
+
+                } else if (characteristic.uuid.equals(dataCharUuid)) {
+                    val sharedSecret = generateSharedSecret(privateKey!!, receivePublicKey!!)
+
+                    Log.d("TTTT encrypt value : ", String(value))
+                    Log.d("TTTT decrypt value : ", String(decrypt(value, sharedSecret)))
+
                 }
 
-                if(responseNeeded) {
-                    server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, byteArrayOf())
-                }
+            }
+
+            override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
+                super.onMtuChanged(device, mtu)
+                // MTU 변경 처리
+                Log.d("TTTT GATT Server", "MTU changed to: $mtu")
+
             }
 
             override fun onExecuteWrite(
@@ -228,20 +279,21 @@ class BluetoothCTFServer(private val context: Context) {
         }
         val service = BluetoothGattService(serviceUuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
 
-        val passwordCharacteristic = BluetoothGattCharacteristic(
-            passwordCharUuid,
-            BluetoothGattCharacteristic.PROPERTY_READ,
-            BluetoothGattCharacteristic.PERMISSION_READ
+        val publicKeyCharacteristic = BluetoothGattCharacteristic(
+            publicKeyCharUuid,
+            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_WRITE,
+            BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
         )
 
-        val nameCharacteristic = BluetoothGattCharacteristic(
-            nameCharUuid,
-            BluetoothGattCharacteristic.PROPERTY_WRITE,
-            BluetoothGattCharacteristic.PERMISSION_WRITE
+        val dataCharacteristic = BluetoothGattCharacteristic(
+            dataCharUuid,
+            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_WRITE,
+            BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
         )
 
-        service.addCharacteristic(passwordCharacteristic)
-        service.addCharacteristic(nameCharacteristic)
+        service.addCharacteristic(publicKeyCharacteristic)
+        service.addCharacteristic(dataCharacteristic)
+
         Log.v("bluetooth server", "addService")
 
         server?.addService(service)
@@ -256,4 +308,64 @@ class BluetoothCTFServer(private val context: Context) {
             ctfService = null
         }
     }
+
+    fun stringToJson(jsonString: String): JSONObject {
+        return JSONObject(jsonString)
+    }
+
+    fun publicKeyToString(publicKey: PublicKey): String {
+        return Base64.getEncoder().encodeToString(publicKey.encoded)
+    }
+
+    fun priveKeyToString(privateKey: PrivateKey): String {
+        return Base64.getEncoder().encodeToString(privateKey.encoded)
+    }
+
+    fun generateKeyPair(): Pair<PublicKey, PrivateKey> {
+        val keyGen = KeyPairGenerator.getInstance("EC")
+        keyGen.initialize(256)
+        val keyPair = keyGen.generateKeyPair()
+        return Pair(keyPair.public, keyPair.private)
+    }
+
+    fun generateSharedSecret(privateKey: PrivateKey, publicKey: PublicKey): ByteArray {
+        val keyAgreement = KeyAgreement.getInstance("ECDH")
+        keyAgreement.init(privateKey)
+        keyAgreement.doPhase(publicKey, true)
+        return keyAgreement.generateSecret()
+    }
+
+    // AES-256 암호화
+    fun encrypt(data: ByteArray, secret: ByteArray): ByteArray {
+        val key: SecretKey = SecretKeySpec(secret.copyOf(32), "AES") // 32 bytes for AES-256
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        val iv = ByteArray(16).apply { java.security.SecureRandom().nextBytes(this) } // 랜덤 IV 생성
+        val ivParameterSpec = IvParameterSpec(iv)
+
+        cipher.init(Cipher.ENCRYPT_MODE, key, ivParameterSpec)
+        val encrypted = cipher.doFinal(data)
+
+        // IV와 암호문을 Base64로 인코딩하여 반환
+        return iv + encrypted
+    }
+
+    // AES-256 복호화
+    fun decrypt(encryptedData: ByteArray, secret: ByteArray): ByteArray {
+        val key: SecretKey = SecretKeySpec(secret.copyOf(32), "AES")
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+
+        val iv = encryptedData.copyOfRange(0, 16) // IV를 추출
+        val encryptedBytes = encryptedData.copyOfRange(16, encryptedData.size)
+
+        val ivParameterSpec = IvParameterSpec(iv)
+        cipher.init(Cipher.DECRYPT_MODE, key, ivParameterSpec)
+        return cipher.doFinal(encryptedBytes)
+    }
+
+    fun getPublicKeyFromEncoded(encoded: ByteArray): PublicKey {
+        val keySpec = X509EncodedKeySpec(encoded)
+        val keyFactory = KeyFactory.getInstance("EC") // ECDH 알고리즘 사용
+        return keyFactory.generatePublic(keySpec)
+    }
+
 }
