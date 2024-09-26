@@ -26,10 +26,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.math.BigInteger
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.PrivateKey
 import java.security.PublicKey
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECGenParameterSpec
+import java.security.spec.ECParameterSpec
+import java.security.spec.ECPoint
+import java.security.spec.ECPublicKeySpec
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
 import java.util.UUID
@@ -72,6 +78,7 @@ class BluetoothCTFServer(private val context: Context) {
     var publicKey: PublicKey? = null
     private var privateKey: PrivateKey? = null
     private var receivePublicKey: PublicKey? = null
+    private val TAG = "TTTT"
 
     @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_CONNECT, PERMISSION_BLUETOOTH_ADVERTISE])
     suspend fun startServer() = withContext(Dispatchers.IO) {
@@ -82,7 +89,6 @@ class BluetoothCTFServer(private val context: Context) {
 
         startAdvertising()
         startHandlingIncomingConnections()
-
     }
 
     @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_CONNECT, PERMISSION_BLUETOOTH_ADVERTISE])
@@ -182,19 +188,19 @@ class BluetoothCTFServer(private val context: Context) {
                 characteristic: BluetoothGattCharacteristic?
             ) {
                 super.onCharacteristicReadRequest(device, requestId, offset, characteristic)
+                Log.d("TTTT", "onCharacteristicReadRequest")
                 Log.d("TTTT", characteristic!!.uuid.toString())
+
+                if (publicKey == null) {
+                    return
+                }
 
                 if (characteristic != null) {
                     if (characteristic.uuid == publicKeyCharUuid) {
-                        generateKeyPair().apply {
-                            publicKey = this.first
-                            privateKey = this.second
-                        }
-
                         Log.d("TTTT public key :", publicKeyToString(publicKey!!))
                         Log.d("TTTT privateKey key :", priveKeyToString(privateKey!!))
 
-                        val data = publicKey!!.encoded
+                        val data = sendData(publicKey!!)
 
                         server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
                     }
@@ -222,19 +228,44 @@ class BluetoothCTFServer(private val context: Context) {
                     value
                 )
                 super.onCharacteristicWriteRequest(device, requestId, characteristic, preparedWrite, responseNeeded, offset, value)
+                generateKeyPair().apply {
+                    publicKey = this.first
+                    privateKey = this.second
+                }
                 Log.d("TTTT", "onCharacteristicWriteRequest")
                 Log.d("TTTT", characteristic.uuid.toString())
-                Log.d("TTTT data", dataCharUuid.toString())
+                Log.d("TTTT byte data :", "byte = ${value.contentToString()}")
+                Log.d("TTTT data :", "String = ${android.util.Base64.encode(value, android.util.Base64.NO_WRAP).decodeToString()}")
+
+                Log.d("TTTT size: ", value.size.toString())
+                if (value.size < 64) {
+                    return
+
+                }
+                Log.d("TTTT offest :", offset.toString())
+
+                val ecParameterSpec: ECParameterSpec = KeyFactory
+                    .getInstance("EC")
+                    .getKeySpec(
+                        publicKey,
+                        ECPublicKeySpec::class.java
+                    ).params
 
                 if (characteristic.uuid.equals(publicKeyCharUuid)) {
-                    Log.d("TTTT value : ", publicKeyToString(getPublicKeyFromEncoded(value)))
-                    receivePublicKey = getPublicKeyFromEncoded(value)
+                    Log.d("TTTT value : ", publicKeyToString(getEcPublicKey(value, ecParameterSpec)))
+                    receivePublicKey = getEcPublicKey(value, ecParameterSpec)
+
+                    val sharedSecretKey = generateSharedSecret(privateKey!!, receivePublicKey!!)
+                    Log.d("TTTT secret byte : ", sharedSecretKey.decodeToString())
+                    Log.d("TTTT secret content byte : ", sharedSecretKey.contentToString())
+                    Log.d("TTTT secret base64 :", "String = ${android.util.Base64.encode(sharedSecretKey, android.util.Base64.NO_WRAP).decodeToString()}")
+
                     if(preparedWrite) {
                         val bytes = preparedWrites.getOrDefault(requestId, byteArrayOf())
                         preparedWrites[requestId] = bytes.plus(value)
                     }
                     else {
-                        namesReceived.update { it.plus(publicKeyToString(getPublicKeyFromEncoded(value))) }
+                        namesReceived.update { it.plus(publicKeyToString(getEcPublicKey(value, ecParameterSpec))) }
                     }
 
                     if(responseNeeded) {
@@ -321,13 +352,6 @@ class BluetoothCTFServer(private val context: Context) {
         return Base64.getEncoder().encodeToString(privateKey.encoded)
     }
 
-    fun generateKeyPair(): Pair<PublicKey, PrivateKey> {
-        val keyGen = KeyPairGenerator.getInstance("EC")
-        keyGen.initialize(256)
-        val keyPair = keyGen.generateKeyPair()
-        return Pair(keyPair.public, keyPair.private)
-    }
-
     fun generateSharedSecret(privateKey: PrivateKey, publicKey: PublicKey): ByteArray {
         val keyAgreement = KeyAgreement.getInstance("ECDH")
         keyAgreement.init(privateKey)
@@ -362,10 +386,65 @@ class BluetoothCTFServer(private val context: Context) {
         return cipher.doFinal(encryptedBytes)
     }
 
-    fun getPublicKeyFromEncoded(encoded: ByteArray): PublicKey {
-        val keySpec = X509EncodedKeySpec(encoded)
+    private fun sendData(publicKey: PublicKey): ByteArray? {
+        if (publicKey is ECPublicKey) {
+            val ecPublicKey = publicKey as ECPublicKey
+            val affineXByteArray = ecPublicKey.w.affineX.toByteArray()
+            val filteredAffineXByteArray = filterMostSignificantByte(affineXByteArray)
+            val affineYByteArray = ecPublicKey.w.affineY.toByteArray()
+            val filteredAffineYByteArray = filterMostSignificantByte(affineYByteArray)
+            val keyByteArray = byteArrayOf(0x04).plus(filteredAffineXByteArray).plus(filteredAffineYByteArray)
+            Log.d(TAG, "ECPublicKey affineXByteArray = ${affineXByteArray.contentToString()}, size = ${affineXByteArray.size}")
+            Log.d(TAG, "ECPublicKey affineYByteArray = ${affineYByteArray.contentToString()}, size = ${affineYByteArray.size}")
+            Log.d(TAG, "ECPublicKey filteredAffineXByteArray = ${filteredAffineXByteArray.contentToString()}, size = ${filteredAffineXByteArray.size}")
+            Log.d(TAG, "ECPublicKey filteredAffineYByteArray = ${filteredAffineYByteArray.contentToString()}, size = ${filteredAffineYByteArray.size}")
+            Log.d(TAG, "ECPublicKey keyByteArray = ${keyByteArray.contentToString()}, size = ${keyByteArray.size}")
+
+            return keyByteArray
+        } else {
+            Log.d(TAG, "ECPublicKey This is not an EC public key.")
+        }
+        return null
+    }
+
+    private fun filterMostSignificantByte(byteArray: ByteArray): ByteArray {
+        val xBytes32 = ByteArray(32)
+        val byteArraySize = byteArray.size
+        Log.d(TAG, "filterMostSignificantByte byteArray = ${byteArray.decodeToString()}, byteArraySize = $byteArraySize")
+
+        if (byteArraySize <= 32) {
+            // 패딩 추가
+            System.arraycopy(byteArray, 0, xBytes32, 32 - byteArraySize, byteArraySize)
+        } else if (byteArraySize == 33) {
+            // 33바이트인 경우, 최상위 바이트 제거
+            System.arraycopy(byteArray, 1, xBytes32, 0, 32)
+        } else {
+            throw Throwable("removeMostSignificantByte Too many Byte")
+        }
+
+        return xBytes32
+    }
+
+    private fun generateKeyPair(): Pair<PublicKey, PrivateKey> {
+        val keyGen = KeyPairGenerator.getInstance("EC")
+        keyGen.initialize(ECGenParameterSpec("secp256r1")) // P-256은 secp256r1로 정의됨
+        val keyPair = keyGen.generateKeyPair()
+        return Pair(keyPair.public, keyPair.private)
+    }
+
+    private fun getEcPublicKey(ecPublicKey: ByteArray, params: ECParameterSpec): PublicKey {
+        val ecPointX = ecPublicKey.sliceArray(IntRange(1, 32))
+        val ecPointY = ecPublicKey.sliceArray(IntRange(33, 64))
+        // x와 y를 BigInteger로 변환
+        val x = BigInteger(1, ecPointX) // 1은 부호를 나타냄 (양수)
+        val y = BigInteger(1, ecPointY)
+
+        // ECPoint를 사용하여 공개 키의 포인트 정의
+        val ecPoint = ECPoint(x, y)
         val keyFactory = KeyFactory.getInstance("EC") // ECDH 알고리즘 사용
-        return keyFactory.generatePublic(keySpec)
+        val pubSpec = ECPublicKeySpec(ecPoint, params)
+        return keyFactory.generatePublic(pubSpec)
+
     }
 
 }
