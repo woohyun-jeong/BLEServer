@@ -79,6 +79,7 @@ class BluetoothCTFServer(private val context: Context) {
     private var privateKey: PrivateKey? = null
     private var receivePublicKey: PublicKey? = null
     private val TAG = "TTTT"
+    var sharedSecretKey: ByteArray? = null
 
     @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_CONNECT, PERMISSION_BLUETOOTH_ADVERTISE])
     suspend fun startServer() = withContext(Dispatchers.IO) {
@@ -255,8 +256,8 @@ class BluetoothCTFServer(private val context: Context) {
                     Log.d("TTTT value : ", publicKeyToString(getEcPublicKey(value, ecParameterSpec)))
                     receivePublicKey = getEcPublicKey(value, ecParameterSpec)
 
-                    val sharedSecretKey = generateSharedSecret(privateKey!!, receivePublicKey!!)
-                    Log.d("TTTT secret byte : ", sharedSecretKey.decodeToString())
+                    sharedSecretKey = generateSharedSecret(privateKey!!, receivePublicKey!!)
+                    Log.d("TTTT secret byte : ", sharedSecretKey!!.decodeToString())
                     Log.d("TTTT secret content byte : ", sharedSecretKey.contentToString())
                     Log.d("TTTT secret base64 :", "String = ${android.util.Base64.encode(sharedSecretKey, android.util.Base64.NO_WRAP).decodeToString()}")
 
@@ -273,10 +274,8 @@ class BluetoothCTFServer(private val context: Context) {
                     }
 
                 } else if (characteristic.uuid.equals(dataCharUuid)) {
-                    val sharedSecret = generateSharedSecret(privateKey!!, receivePublicKey!!)
-
                     Log.d("TTTT encrypt value : ", String(value))
-                    Log.d("TTTT decrypt value : ", String(decrypt(value, sharedSecret)))
+                    Log.d("TTTT decrypt value : ", String(decrypt(value, sharedSecretKey!!)))
 
                 }
 
