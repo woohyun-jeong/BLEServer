@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
@@ -27,6 +28,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.math.BigInteger
+import java.nio.charset.Charset
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.PrivateKey
@@ -80,6 +82,15 @@ class BluetoothCTFServer(private val context: Context) {
     private var receivePublicKey: PublicKey? = null
     private val TAG = "TTTT"
     var sharedSecretKey: ByteArray? = null
+    private var clientOffset = 0
+    private var mtuSize = 23  // MTU 크기 설정 (최대 크기 확인 필요)
+    private val END_OF_DATA = "END_OF_DATA"  // 데이터 끝을 알리는 마커 (문자열로 설정)
+    // 각 클라이언트의 MAC 주소를 사용하여 오프셋 관리
+    private var fullData = byteArrayOf()  // 전체 데이터를 받을 StringBuilder
+    private var serverOffset = 0
+
+    // 예시로 전송할 데이터
+    private val data2 = "abcdef1안녕하세요호호2안녕하세요호호3안녕하세요호호4안녕하세요호호5안녕하세요호호6안녕하세요호호7안녕하세요호호8안녕하세요호호9안녕하세요호호10안녕하세요호호11안녕하세요호호12안녕하세요호호13안녕하세요호호14안녕하세요호호15안녕하세요호호16안녕하세요호호17안녕하세요호호18안녕하세요호호19안녕하세요호호20안녕하세요호호21안녕하세요호호22안녕하세요호호23안녕하세요호호24안녕하세요호호25안녕하세요호호26안녕하세요호호27안녕하세요호호28안녕하세요호호29안녕하세요호호30안녕하세요호호31안녕하세요호호32안녕하세요호호33안녕하세요호호34안녕하세요호호35안녕하세요호호36안녕하세요호호37안녕하세요호호38안녕하세요호호39안녕하세요호호40안녕하세요호호41안녕하세요호호42안녕하세요호호43안녕하세요호호44안녕하세요호호45안녕하세요호호46안녕하세요호호47안녕하세요호호48안녕하세요호호49안녕하세요호호50안녕하세요호호51안녕하세요호호52안녕하세요호호53안녕하세요호호54END_OF_DATA"
 
     @RequiresPermission(allOf = [PERMISSION_BLUETOOTH_CONNECT, PERMISSION_BLUETOOTH_ADVERTISE])
     suspend fun startServer() = withContext(Dispatchers.IO) {
@@ -181,6 +192,73 @@ class BluetoothCTFServer(private val context: Context) {
                 isServerListening.value = true
             }
 
+            override fun onDescriptorWriteRequest(
+                device: BluetoothDevice?,
+                requestId: Int,
+                descriptor: BluetoothGattDescriptor?,
+                preparedWrite: Boolean,
+                responseNeeded: Boolean,
+                offset: Int,
+                value: ByteArray?
+            ) {
+                super.onDescriptorWriteRequest(
+                    device,
+                    requestId,
+                    descriptor,
+                    preparedWrite,
+                    responseNeeded,
+                    offset,
+                    value
+                )
+                Log.d("TTTT","onDescriptorWriteRequest")
+            }
+
+            override fun onNotificationSent(device: BluetoothDevice?, status: Int) {
+                super.onNotificationSent(device, status)
+                Log.d("TTTT" , "onNotificationSent")
+            }
+
+            override fun onConnectionStateChange(
+                device: BluetoothDevice?,
+                status: Int,
+                newState: Int
+            ) {
+                super.onConnectionStateChange(device, status, newState)
+
+                Log.d("TTTT" , "onConnectionStateChange")
+                Log.d("TTTT" , "$device, $status, $newState")
+
+
+            }
+
+            override fun onDescriptorReadRequest(
+                device: BluetoothDevice?,
+                requestId: Int,
+                offset: Int,
+                descriptor: BluetoothGattDescriptor?
+            ) {
+                super.onDescriptorReadRequest(device, requestId, offset, descriptor)
+                Log.d("TTTT" , "onDescriptorReadRequest")
+
+            }
+
+            override fun onPhyRead(device: BluetoothDevice?, txPhy: Int, rxPhy: Int, status: Int) {
+                super.onPhyRead(device, txPhy, rxPhy, status)
+                Log.d("TTTT" , "onPhyRead")
+
+            }
+
+            override fun onPhyUpdate(
+                device: BluetoothDevice?,
+                txPhy: Int,
+                rxPhy: Int,
+                status: Int
+            ) {
+                super.onPhyUpdate(device, txPhy, rxPhy, status)
+                Log.d("TTTT" , "onPhyUpdate")
+
+            }
+
             @RequiresPermission(PERMISSION_BLUETOOTH_CONNECT)
             override fun onCharacteristicReadRequest(
                 device: BluetoothDevice?,
@@ -190,21 +268,76 @@ class BluetoothCTFServer(private val context: Context) {
             ) {
                 super.onCharacteristicReadRequest(device, requestId, offset, characteristic)
                 Log.d("TTTT", "onCharacteristicReadRequest")
-                Log.d("TTTT", characteristic!!.uuid.toString())
+                Log.d("TTTT uuid", characteristic!!.uuid.toString())
+                Log.d("TTTT device", "$device")
+                Log.d("TTTT requestId", requestId.toString())
 
-                if (publicKey == null) {
-                    return
-                }
+                /**
+                 * @brief publicKey Test
+                 */
+//                if (publicKey == null) {
+//                    return
+//                }
+//
+//                if (characteristic != null) {
+//                    if (characteristic.uuid == publicKeyCharUuid) {
+//                        Log.d("TTTT public key :", publicKeyToString(publicKey!!))
+//                        Log.d("TTTT privateKey key :", priveKeyToString(privateKey!!))
+//
+//                        val data = sendData(publicKey!!)
+//
+//                        server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
+//                    }
+//                }
+//                val data = "안녕하세요1안녕하세요2안녕하세요3안녕하세요4안녕하세요5안녕하세요6안녕하세요7안녕하세요8안녕하세요9안녕하세요10안녕하세요11안녕하세요12안녕하세요13안녕하세요14안녕하세요15안녕하세요16안녕하세요17안녕하세요18안녕하세요19안녕하세요20안녕하세요21안녕하세요22안녕하세요23안녕하세요24안녕하세요25안녕하세요26안녕하세요27안녕하세요28안녕하세요29안녕하세요30안녕하세요31안녕하세요32안녕하세요33안녕하세요34안녕하세요35안녕하세요36안녕하세요37안녕하세요38안녕하세요39안녕하세요40안녕하세요41안녕하세요42안녕하세요43안녕하세요44안녕하세요45안녕하세요46안녕하세요47안녕하세요48안녕하세요49안녕하세요50안녕하세요51안녕하세요52안녕하세요53안녕하세요54END_OF_DATA"
+//                Log.d("TTTT data:", data)
+//                val chunkSize = mtuSize - 3
+//                Log.d("TTTT chunk", chunkSize.toString())
+//
+//                val chunks = data.chunked(chunkSize)
+//                for (chunk in chunks) {
+//                    Log.d("TTTT chunk :", chunk)
+//
+//                    val byteData = chunk.toByteArray()
+//                    server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, byteData)
+//
+//                }
 
-                if (characteristic != null) {
-                    if (characteristic.uuid == publicKeyCharUuid) {
-                        Log.d("TTTT public key :", publicKeyToString(publicKey!!))
-                        Log.d("TTTT privateKey key :", priveKeyToString(privateKey!!))
+                //
+                // 특성 값이 너무 크면 데이터를 MTU 크기만큼 나누어 전송
+                val dataBytes = data2.toByteArray(Charset.forName("UTF-8"))
+                Log.d("BLE Server mtuSize", mtuSize.toString())
 
-                        val data = sendData(publicKey!!)
+                // MTU 크기 계산 (오버헤드를 고려하여 실제 데이터 전송 크기 계산)
+                val mtuSize = mtuSize - 3 // 헤더 크기 등 고려
+                // 요청된 오프셋에 해당하는 데이터 범위 계산
+                val endOffset = minOf(clientOffset + mtuSize, dataBytes.size)
+                Log.d("BLE Server offset", clientOffset.toString())
+                Log.d("BLE Server endOffset", endOffset.toString())
 
-                        server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
+                if (clientOffset < dataBytes.size) {
+                    val dataChunk = dataBytes.copyOfRange(clientOffset, endOffset)
+                    Log.d("BLE Server", "Sending data chunk: ${String(dataChunk)}")
+
+                    // 클라이언트에 데이터 전송
+                    server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, clientOffset, dataChunk)
+                    clientOffset = endOffset - 2
+                    // 데이터가 아직 남아 있다면, 이어서 요청을 처리
+                    if (endOffset < dataBytes.size) {
+                        Log.d("BLE Server", "Remaining data, waiting for next read request")
+                    } else {
+                        characteristic.value = ByteArray(0x00)
+
+                        server?.notifyCharacteristicChanged(
+                            device,  // 클라이언트 디바이스 주소
+                            characteristic,
+                            false,  // 인디케이션이 아니므로 false,
+                        )
+                        Log.d("BLE Server", "Data transmission complete.")
                     }
+                } else {
+                    // 요청된 offset이 데이터 범위를 벗어나면 오류 응답
+                    server?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, clientOffset, null)
                 }
 
             }
@@ -219,70 +352,89 @@ class BluetoothCTFServer(private val context: Context) {
                 offset: Int,
                 value: ByteArray
             ) {
-                super.onCharacteristicWriteRequest(
-                    device,
-                    requestId,
-                    characteristic,
-                    preparedWrite,
-                    responseNeeded,
-                    offset,
-                    value
-                )
                 super.onCharacteristicWriteRequest(device, requestId, characteristic, preparedWrite, responseNeeded, offset, value)
-                generateKeyPair().apply {
-                    publicKey = this.first
-                    privateKey = this.second
-                }
                 Log.d("TTTT", "onCharacteristicWriteRequest")
                 Log.d("TTTT", characteristic.uuid.toString())
                 Log.d("TTTT byte data :", "byte = ${value.contentToString()}")
                 Log.d("TTTT data :", "String = ${android.util.Base64.encode(value, android.util.Base64.NO_WRAP).decodeToString()}")
+//                Log.d("TTTT size: ", value.size.toString())
+//                if (value.size < 64) {
+//                    return
+//
+//                }
+//                Log.d("TTTT offest :", offset.toString())
+//
+//                val ecParameterSpec: ECParameterSpec = KeyFactory
+//                    .getInstance("EC")
+//                    .getKeySpec(
+//                        publicKey,
+//                        ECPublicKeySpec::class.java
+//                    ).params
+//
+//                if (characteristic.uuid.equals(publicKeyCharUuid)) {
+//                    Log.d("TTTT value : ", publicKeyToString(getEcPublicKey(value, ecParameterSpec)))
+//                    receivePublicKey = getEcPublicKey(value, ecParameterSpec)
+//
+//                    sharedSecretKey = generateSharedSecret(privateKey!!, receivePublicKey!!)
+//                    Log.d("TTTT secret byte : ", sharedSecretKey!!.decodeToString())
+//                    Log.d("TTTT secret content byte : ", sharedSecretKey.contentToString())
+//                    Log.d("TTTT secret base64 :", "String = ${android.util.Base64.encode(sharedSecretKey, android.util.Base64.NO_WRAP).decodeToString()}")
+//
+//                    if(preparedWrite) {
+//                        val bytes = preparedWrites.getOrDefault(requestId, byteArrayOf())
+//                        preparedWrites[requestId] = bytes.plus(value)
+//                    }
+//                    else {
+//                        namesReceived.update { it.plus(publicKeyToString(getEcPublicKey(value, ecParameterSpec))) }
+//                    }
+//
+//                    if(responseNeeded) {
+//                        server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, byteArrayOf())
+//                    }
+//
+//                } else if (characteristic.uuid.equals(dataCharUuid)) {
+//                    Log.d("TTTT encrypt value : ", String(value))
+//                    Log.d("TTTT decrypt value : ", String(decrypt(value, sharedSecretKey!!)))
+//
+//                }
 
-                Log.d("TTTT size: ", value.size.toString())
-                if (value.size < 64) {
-                    return
+                val data = value
 
+                // 받은 데이터를 문자열로 변환
+                val receivedData = data
+                Log.d("TTTT byteSize", receivedData.size.toString())
+
+                // 데이터를 StringBuilder에 추가
+                fullData += receivedData
+
+                val strReceivedData = String(receivedData)
+                Log.d("BluetoothGattClient", "Received chunk: $strReceivedData")
+
+                // 받은 데이터가 "END_OF_DATA"인지 확인
+                if (String(receivedData).contains("END_OF_DATA")) {
+                    // "END_OF_DATA"가 포함되었다면, 데이터 수신 완료
+                    val hexString = fullData.joinToString(" ") { String.format("%02X", it) }
+                    Log.d("Complete Byte Data:", "ByteArray: $hexString")
+                    Log.d("Complete Data:", String(fullData))
+                    // 여기서 받은 데이터를 처리합니다.
+                } else {
+                    // 아직 끝나지 않은 경우, 다음 데이터를 읽기 위해 offset을 증가시키고 다시 요청
+                    serverOffset += mtuSize
                 }
-                Log.d("TTTT offest :", offset.toString())
 
-                val ecParameterSpec: ECParameterSpec = KeyFactory
-                    .getInstance("EC")
-                    .getKeySpec(
-                        publicKey,
-                        ECPublicKeySpec::class.java
-                    ).params
-
-                if (characteristic.uuid.equals(publicKeyCharUuid)) {
-                    Log.d("TTTT value : ", publicKeyToString(getEcPublicKey(value, ecParameterSpec)))
-                    receivePublicKey = getEcPublicKey(value, ecParameterSpec)
-
-                    sharedSecretKey = generateSharedSecret(privateKey!!, receivePublicKey!!)
-                    Log.d("TTTT secret byte : ", sharedSecretKey!!.decodeToString())
-                    Log.d("TTTT secret content byte : ", sharedSecretKey.contentToString())
-                    Log.d("TTTT secret base64 :", "String = ${android.util.Base64.encode(sharedSecretKey, android.util.Base64.NO_WRAP).decodeToString()}")
-
-                    if(preparedWrite) {
-                        val bytes = preparedWrites.getOrDefault(requestId, byteArrayOf())
-                        preparedWrites[requestId] = bytes.plus(value)
-                    }
-                    else {
-                        namesReceived.update { it.plus(publicKeyToString(getEcPublicKey(value, ecParameterSpec))) }
-                    }
-
-                    if(responseNeeded) {
-                        server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, byteArrayOf())
-                    }
-
-                } else if (characteristic.uuid.equals(dataCharUuid)) {
-                    Log.d("TTTT encrypt value : ", String(value))
-                    Log.d("TTTT decrypt value : ", String(decrypt(value, sharedSecretKey!!)))
-
-                }
+                characteristic.value = byteArrayOf(0x00)
+                server?.notifyCharacteristicChanged(
+                    device,  // 클라이언트 디바이스 주소
+                    characteristic,
+                    false,  // 인디케이션이 아니므로 false,
+                )
+//                server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, clientOffset, ByteArray(0x00))
 
             }
 
             override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
                 super.onMtuChanged(device, mtu)
+                mtuSize = mtu
                 // MTU 변경 처리
                 Log.d("TTTT GATT Server", "MTU changed to: $mtu")
 
@@ -311,13 +463,13 @@ class BluetoothCTFServer(private val context: Context) {
 
         val publicKeyCharacteristic = BluetoothGattCharacteristic(
             publicKeyCharUuid,
-            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_WRITE,
+            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_WRITE  or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
             BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
         )
 
         val dataCharacteristic = BluetoothGattCharacteristic(
             dataCharUuid,
-            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_WRITE,
+            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_WRITE  or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
             BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
         )
 
